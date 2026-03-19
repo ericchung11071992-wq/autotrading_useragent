@@ -135,6 +135,26 @@ class AgentExchangeClient:
             logger.error(f"Failed to get balance: {e}")
             return None
 
+    async def get_account_uid(self) -> Optional[str]:
+        """API key에 연결된 거래소 계정 UID 조회 (레퍼럴 검증용)"""
+        try:
+            if self.exchange_id == "bybit":
+                resp = await self.exchange.private_get_v5_user_query_api()
+                return str(resp["result"]["userID"])
+            elif self.exchange_id == "okx":
+                resp = await self.exchange.private_get_account_config()
+                return str(resp["data"][0]["uid"])
+            elif self.exchange_id == "bitget":
+                resp = await self.exchange.private_get_api_v2_user_info()
+                return str(resp["data"]["userId"])
+            elif self.exchange_id == "bingx":
+                resp = await self.exchange.private_get_openapi_account_v1_uid()
+                return str(resp["data"]["uid"])
+            return None
+        except Exception as e:
+            logger.error(f"get_account_uid failed [{self.exchange_id}]: {e}")
+            return None
+
     # ===== 현재가 조회 =====
 
     async def get_current_price(self, symbol: str) -> Optional[Decimal]:

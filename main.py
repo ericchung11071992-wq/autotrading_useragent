@@ -86,7 +86,7 @@ def check_timestamp(timestamp_str: str, max_age_seconds: int = 60) -> bool:
 # ===== 스키마 =====
 
 class ExecuteRequest(BaseModel):
-    order_type: str             # "market_entry"|"close"|"set_sl"|"set_leverage"|"cancel_order"|"cancel_all"
+    order_type: str             # "market_entry"|"close"|"set_sl"|"set_leverage"|"cancel_order"|"cancel_all"|"adjust"
     symbol: str
     side: Optional[str] = None          # "Buy" or "Sell"
     qty: Optional[str] = None           # 수량 문자열 (정밀도 처리는 거래소 클라이언트에서)
@@ -302,6 +302,54 @@ async def execute_order(request: ExecuteRequest):
             success = await client.cancel_all_orders(symbol)
             return {"success": success}
 
+        elif request.order_type == "adjust":
+            # 재조정: 기존 주문 전체 취소 → SL 설정 → TP/DCA 주문 재배치
+            await client.cancel_all_orders(symbol)
+
+            # 최신 포지션 조회 (DCA 체결로 인한 수량 변동 반영)
+            position = await client.get_position(symbol)
+            position_qty = position.qty if position else Decimal("0")
+
+            sl_set = False
+            if request.sl_price:
+                sl_set = await client.set_stop_loss(symbol, Decimal(str(request.sl_price)))
+
+            tp_order_ids = []
+            if request.tp_orders:
+                for tp in request.tp_orders:
+                    tp_id = await client.place_tp_order(
+                        symbol,
+                        tp["side"],
+                        Decimal(str(tp["qty"])),
+                        Decimal(str(tp["price"]))
+                    )
+                    if tp_id:
+                        tp_order_ids.append(tp_id)
+
+            dca_order_ids = []
+            if request.dca_orders:
+                for dca in request.dca_orders:
+                    dca_id = await client.place_limit_order(
+                        symbol,
+                        dca["side"],
+                        Decimal(str(dca["qty"])),
+                        Decimal(str(dca["price"]))
+                    )
+                    if dca_id:
+                        dca_order_ids.append(dca_id)
+
+            logger.info(
+                f"adjust completed: {symbol} sl={request.sl_price} "
+                f"(tp={len(tp_order_ids)}, dca={len(dca_order_ids)}, position_qty={position_qty})"
+            )
+            return {
+                "success": True,
+                "position_qty": str(position_qty),
+                "sl_set": sl_set,
+                "tp_order_ids": tp_order_ids,
+                "dca_order_ids": dca_order_ids,
+            }
+
         else:
             raise HTTPException(status_code=400, detail=f"Unknown order_type: {request.order_type}")
 
@@ -388,6 +436,22 @@ async def get_balance(authorization: str = Header(None)):
             "usdt_balance": float(balance) if balance is not None else None,
             "exchange": settings.exchange,
         }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ===== 거래소 UID 조회 =====
+
+@app.get("/uid")
+async def get_uid(authorization: str = Header(None)):
+    """거래소 계정 UID 조회 (레퍼럴 검증용)"""
+    if not verify_bearer_token(authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    client = get_exchange_client()
+    try:
+        uid = await client.get_account_uid()
+        return {"uid": uid, "exchange": settings.exchange}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
