@@ -172,18 +172,21 @@ async def _notify_position_closed(symbol: str):
     """청산 콜백 — Bybit에서 closed PnL 조회 후 전송"""
     client = get_exchange_client()
     payload: dict = {"symbol": symbol}
-    try:
-        pnl_info = await client.get_closed_pnl(symbol)
-        if pnl_info:
-            if pnl_info.get("avgExitPrice"):
-                payload["exit_price"] = str(pnl_info["avgExitPrice"])
-            if pnl_info.get("closedPnl") is not None:
-                payload["realized_pnl"] = str(pnl_info["closedPnl"])
-            if pnl_info.get("cumEntryValue") and pnl_info.get("cumExitValue"):
-                # commission = sum of entry+exit fees (Bybit doesn't expose directly)
-                pass
-    except Exception as e:
-        logger.warning(f"[ManualDetect] closed_pnl 조회 실패: {e}")
+    pnl_info = None
+    for attempt in range(4):
+        try:
+            pnl_info = await client.get_closed_pnl(symbol)
+            if pnl_info:
+                break
+        except Exception as e:
+            logger.warning(f"[ManualDetect] closed_pnl 조회 실패 (attempt {attempt + 1}): {e}")
+        if attempt < 3:
+            await asyncio.sleep(3)
+    if pnl_info:
+        if pnl_info.get("avgExitPrice"):
+            payload["exit_price"] = str(pnl_info["avgExitPrice"])
+        if pnl_info.get("closedPnl") is not None:
+            payload["realized_pnl"] = str(pnl_info["closedPnl"])
     await _post_to_central("/api/agent/position-closed", payload)
 
 
@@ -617,6 +620,33 @@ async def get_price(symbol: str, authorization: str = Header(None)):
         }
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+# ===== 청산 PnL 조회 =====
+
+@app.get("/closed-pnl")
+async def get_closed_pnl_endpoint(symbol: str, authorization: str = Header(None)):
+    """청산 PnL 조회 (중앙서버 close 후 호출 — 최대 4회 재시도)"""
+    if not verify_bearer_token(authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    client = get_exchange_client()
+    for attempt in range(4):
+        try:
+            pnl_info = await client.get_closed_pnl(symbol)
+            if pnl_info:
+                return {
+                    "found": True,
+                    "symbol": symbol,
+                    "exit_price": str(pnl_info["avgExitPrice"]) if pnl_info.get("avgExitPrice") else None,
+                    "realized_pnl": str(pnl_info["closedPnl"]) if pnl_info.get("closedPnl") is not None else None,
+                }
+        except Exception as e:
+            logger.warning(f"get_closed_pnl attempt {attempt + 1} failed: {e}")
+        if attempt < 3:
+            await asyncio.sleep(3)
+
+    return {"found": False, "symbol": symbol, "exit_price": None, "realized_pnl": None}
 
 
 if __name__ == "__main__":
