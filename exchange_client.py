@@ -352,7 +352,7 @@ class AgentExchangeClient:
                     "planType": "pos_loss",
                     "triggerPrice": str(rounded_sl),
                     "triggerType": "fill_price",
-                    "size": "0",
+                    "size": str(position.qty),
                     "holdSide": hold_side,
                     "delegateType": "market",
                 })
