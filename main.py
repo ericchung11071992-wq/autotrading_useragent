@@ -189,6 +189,43 @@ async def _post_to_central(path: str, payload: dict):
         logger.error("[ManualDetect] 콜백 오류 발생")
 
 
+_NETWORK_ERROR_KEYWORDS = ("timeout", "connection", "network", "502", "503", "504")
+
+
+async def _post_error_to_central(error_type: str, file_name: str, function_name: str, message: str):
+    """오류를 메인서버에 리포팅 (네트워크 오류 제외, fire-and-forget)"""
+    if not settings.central_url:
+        return
+    msg_lower = message.lower()
+    if any(kw in msg_lower for kw in _NETWORK_ERROR_KEYWORDS):
+        return
+    try:
+        payload = {
+            "error_type": error_type,
+            "file_name": file_name,
+            "function_name": function_name,
+            "message": message[:500],
+        }
+        payload_bytes = json.dumps(payload, sort_keys=True, default=str).encode()
+        sig = hmac.new(
+            settings.token_secret.encode(),
+            payload_bytes,
+            hashlib.sha256,
+        ).hexdigest()
+        async with httpx.AsyncClient(verify=True, timeout=10.0) as http:
+            await http.post(
+                f"{settings.central_url_normalized}/api/agent/error",
+                content=payload_bytes,
+                headers={
+                    "Authorization": f"Bearer {settings.agent_token}",
+                    "X-Agent-Signature": sig,
+                    "Content-Type": "application/json",
+                },
+            )
+    except Exception:
+        logger.warning("[AgentError] 오류 리포팅 실패 (무시)")
+
+
 async def _notify_manual_position(symbol: str, pos: dict, is_addon: bool):
     """신규진입 or 추가매수 콜백"""
     payload = {
@@ -510,6 +547,7 @@ async def detect_manual_positions():
 
         except Exception as e:
             logger.error(f"[ManualDetect] 폴링 오류: {e}")
+            await _post_error_to_central("logic_error", "main.py", "detect_manual_positions", str(e))
 
 
 async def _run_polling_supervisor():
@@ -519,6 +557,7 @@ async def _run_polling_supervisor():
             await detect_manual_positions()
         except Exception as e:
             logger.error(f"[ManualDetect] 루프 비정상 종료, 30초 후 재시작: {e}")
+            await _post_error_to_central("logic_error", "main.py", "_run_polling_supervisor", str(e))
             await asyncio.sleep(30)
 
 
@@ -806,9 +845,11 @@ async def execute_order(request: Request, execute_req: ExecuteRequest):
         raise
     except ExchangeError as e:
         logger.error(f"Exchange error in execute [{request.order_type}]: {e}")
+        await _post_error_to_central("exchange_error", "main.py", f"execute:{request.order_type}", str(e))
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error in execute [{request.order_type}]: {e}")
+        await _post_error_to_central("unexpected", "main.py", f"execute:{request.order_type}", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
